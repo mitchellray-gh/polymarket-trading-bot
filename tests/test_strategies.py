@@ -9,10 +9,6 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from bot.strategies.arbitrage import ArbitrageStrategy
 from bot.strategies.midpoint import MidpointStrategy
 from bot.strategies.market_making import MarketMakingStrategy

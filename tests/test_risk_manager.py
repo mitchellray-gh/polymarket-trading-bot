@@ -8,10 +8,6 @@ import time
 import unittest
 from unittest.mock import MagicMock
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from bot.execution.risk_manager import RiskManager
 
 
