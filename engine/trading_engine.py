@@ -183,15 +183,42 @@ class TradingEngine:
                 "Set DRY_RUN=false in .env to trade live."
             )
 
+        # How often to re-query Gamma for new markets (market list is stable).
+        # Book prices must be refreshed every cycle; the market list only
+        # needs refreshing once a minute.
+        DISCOVER_INTERVAL_S = 60.0
+
         async with MarketScanner(batch_size=cfg.scan_batch_size) as scanner:
+            market_meta: list = []
+            last_discover_at: float = 0.0
+
             while True:
                 loop_start = time.monotonic()
 
-                # ── 1. Scan ──────────────────────────────────────────────────
+                # ── 1a. Refresh market list every 60 s ───────────────────────
+                if loop_start - last_discover_at >= DISCOVER_INTERVAL_S:
+                    try:
+                        market_meta = await scanner.discover_markets(
+                            max_markets=cfg.scan_batch_size
+                        )
+                        last_discover_at = time.monotonic()
+                        logger.info(
+                            "Market list refreshed: %d tradable markets",
+                            len(market_meta),
+                        )
+                    except Exception as exc:
+                        logger.error("Market discovery failed: %s", exc)
+                        if not market_meta:
+                            await asyncio.sleep(cfg.scan_interval_seconds)
+                            continue
+
+                # ── 1b. Hot-path: fetch order books only (no Gamma call) ──────
                 try:
-                    snapshots: list[MarketSnapshot] = await scanner.scan_markets()
+                    snapshots: list[MarketSnapshot] = await scanner.refresh_books(
+                        market_meta
+                    )
                 except Exception as exc:
-                    logger.error("Market scan failed: %s", exc)
+                    logger.error("Book refresh failed: %s", exc)
                     await asyncio.sleep(cfg.scan_interval_seconds)
                     continue
 

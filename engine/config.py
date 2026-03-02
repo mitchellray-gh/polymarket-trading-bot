@@ -40,8 +40,8 @@ class Config:
     max_open_positions:     int   = field(default_factory=lambda: int(os.getenv("MAX_OPEN_POSITIONS", "10")))
 
     # ── Engine behaviour ────────────────────────────────────────────────────
-    scan_interval_seconds:  float = field(default_factory=lambda: float(os.getenv("SCAN_INTERVAL_SECONDS", "2")))
-    scan_batch_size:        int   = field(default_factory=lambda: int(os.getenv("SCAN_BATCH_SIZE", "20")))
+    scan_interval_seconds:  float = field(default_factory=lambda: float(os.getenv("SCAN_INTERVAL_SECONDS", "0.5")))
+    scan_batch_size:        int   = field(default_factory=lambda: int(os.getenv("SCAN_BATCH_SIZE", "500")))
     dry_run:                bool  = field(default_factory=lambda: os.getenv("DRY_RUN", "true").lower() == "true")
 
     # ── Logging ─────────────────────────────────────────────────────────────

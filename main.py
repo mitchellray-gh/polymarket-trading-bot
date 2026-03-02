@@ -51,8 +51,10 @@ async def _single_scan() -> None:
     cfg    = load_config()
 
     async with MarketScanner(batch_size=cfg.scan_batch_size) as scanner:
-        logger.info("Scanning markets (single pass)…")
-        snapshots = await scanner.scan_markets()
+        logger.info("Discovering markets…")
+        market_meta = await scanner.discover_markets(max_markets=cfg.scan_batch_size)
+        logger.info("Found %d tradable markets, fetching order books…", len(market_meta))
+        snapshots = await scanner.refresh_books(market_meta)
         logger.info("Fetched %d liquid markets", len(snapshots))
 
     detector = OpportunityDetector(min_profit_threshold=cfg.min_profit_threshold)
