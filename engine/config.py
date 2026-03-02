@@ -44,6 +44,12 @@ class Config:
     scan_batch_size:        int   = field(default_factory=lambda: int(os.getenv("SCAN_BATCH_SIZE", "500")))
     dry_run:                bool  = field(default_factory=lambda: os.getenv("DRY_RUN", "true").lower() == "true")
 
+    # ── negRisk maker-sell execution ─────────────────────────────────────────
+    # USDC to post per leg in a maker-sell bundle (e.g. 5 = $5 per leg)
+    maker_leg_usdc:         float = field(default_factory=lambda: float(os.getenv("MAKER_LEG_USDC", "5")))
+    # Set to true to auto-execute maker-sell bundles when signals are found
+    maker_execution_enabled: bool = field(default_factory=lambda: os.getenv("MAKER_EXECUTION_ENABLED", "false").lower() == "true")
+
     # ── Logging ─────────────────────────────────────────────────────────────
     log_level:  str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
     log_file:   str = field(default_factory=lambda: os.getenv("LOG_FILE", "trading_engine.log"))

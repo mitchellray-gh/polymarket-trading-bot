@@ -33,6 +33,7 @@ from .advanced_detector import AdvancedScanResult, run_advanced_scan
 from .client_manager import get_client
 from .config import Config
 from .market_scanner import MarketScanner, MarketSnapshot
+from .negrisk_executor import NegRiskExecutor
 from .opportunity_detector import OpportunityDetector, TradingSignal
 from .position_manager import PositionManager, PositionState
 from .trade_executor import TradeExecutor
@@ -73,6 +74,14 @@ class TradingEngine:
         if self._cfg.dry_run:
             return None
         return self._ensure_executor()
+
+    def _get_negrisk_executor(self) -> NegRiskExecutor:
+        """Return a NegRiskExecutor — works in both dry-run and live mode."""
+        if self._cfg.dry_run:
+            # Create a dummy client-less executor; execute() will short-circuit on dry_run flag
+            return NegRiskExecutor(None, self._cfg)  # type: ignore[arg-type]
+        client = get_client(self._cfg)
+        return NegRiskExecutor(client, self._cfg)
 
     # ── Scan loop helpers ─────────────────────────────────────────────────────
 
@@ -156,6 +165,21 @@ class TradingEngine:
                             sig.event_title[:55], sig.n_legs,
                             sig.pct_overround, sig.est_profit_per_day,
                         )
+                    # Auto-execute if enabled
+                    if self._cfg.maker_execution_enabled or self._cfg.dry_run:
+                        nr_exec = self._get_negrisk_executor()
+                        for sig in result.negrisk_maker:
+                            try:
+                                bundle = await nr_exec.execute(sig)
+                                if bundle.placed > 0 or bundle.dry_run:
+                                    logger.info(
+                                        "[MAKER BUNDLE] '%s'  placed=%d/%d  failed=%d  %.0fms",
+                                        sig.event_title[:50],
+                                        bundle.placed, bundle.n_legs,
+                                        bundle.failed, bundle.elapsed_ms,
+                                    )
+                            except Exception as exc:
+                                logger.error("NegRiskExecutor error: %s", exc)
                 else:
                     logger.debug("Advanced scan: no negRisk maker-sell found")
 
