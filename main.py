@@ -96,13 +96,15 @@ async def _single_scan() -> None:
 async def _advanced_scan() -> None:
     """
     Run all three advanced strategies and pretty-print results.
-    Requires no API credentials (read-only Gamma + CLOB public endpoints).
+    Pass MAKER_EXECUTION_ENABLED=true to also fire the GTC limit orders.
+    Requires credentials only when MAKER_EXECUTION_ENABLED=true and DRY_RUN=false.
     """
     import logging
     import aiohttp
     from tabulate import tabulate
     from engine.advanced_detector import run_advanced_scan
 
+    cfg = load_config()  # read .env once; used for execution section below
     logging.getLogger("engine").setLevel(logging.WARNING)  # suppress debug noise
     connector = aiohttp.TCPConnector(limit=50)
     async with aiohttp.ClientSession(connector=connector) as session:
@@ -211,6 +213,37 @@ async def _advanced_scan() -> None:
         print(f"\n  Post limit orders at 'My bid' / 'My ask' to earn the spread on fills.")
     else:
         print("  No wide-spread MM opportunities found.")
+
+    # ── Auto-execute negRisk maker-sell bundles if enabled ──────────────────
+    if result.negrisk_maker and (cfg.maker_execution_enabled or cfg.dry_run):
+        from engine.negrisk_executor import NegRiskExecutor
+        mode_tag = "[DRY-RUN] " if cfg.dry_run else ""
+        print("\n" + "=" * 70)
+        print(f"  {mode_tag}EXECUTING {len(result.negrisk_maker)} MAKER-SELL BUNDLE(S)")
+        print(  "  (set MAKER_EXECUTION_ENABLED=true + DRY_RUN=false for live orders)")
+        print("=" * 70)
+        if not cfg.dry_run:
+            from engine.client_manager import get_client
+            client = get_client(cfg)
+        else:
+            client = None  # type: ignore[assignment]
+        executor = NegRiskExecutor(client, cfg)  # type: ignore[arg-type]
+        exec_rows = []
+        for sig in result.negrisk_maker:
+            bundle = await executor.execute(sig)
+            if bundle.dry_run:
+                status = f"DRY-RUN  (would place {bundle.n_legs} orders)"
+            else:
+                status = f"placed={bundle.placed}/{bundle.n_legs}  failed={bundle.failed}"
+            exec_rows.append([
+                sig.event_title[:46],
+                sig.n_legs,
+                status,
+                f"{bundle.elapsed_ms:.0f} ms",
+            ])
+        print(tabulate(exec_rows,
+            headers=["Event", "Legs", "Result", "Time"],
+            tablefmt="rounded_outline"))
 
     print(f"\n  Scan completed in {result.elapsed_ms:.0f} ms.\n")
 
