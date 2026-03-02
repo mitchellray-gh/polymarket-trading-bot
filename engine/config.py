@@ -36,7 +36,7 @@ class Config:
 
     # ── Risk / position limits ───────────────────────────────────────────────
     max_position_usdc:      float = field(default_factory=lambda: float(os.getenv("MAX_POSITION_SIZE_USDC", "50")))
-    min_profit_threshold:   float = field(default_factory=lambda: float(os.getenv("MIN_PROFIT_THRESHOLD", "0.005")))
+    min_profit_threshold:   float = field(default_factory=lambda: float(os.getenv("MIN_PROFIT_THRESHOLD", "0.001")))
     max_open_positions:     int   = field(default_factory=lambda: int(os.getenv("MAX_OPEN_POSITIONS", "10")))
 
     # ── Engine behaviour ────────────────────────────────────────────────────

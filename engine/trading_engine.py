@@ -65,6 +65,12 @@ class TradingEngine:
             self._executor = TradeExecutor(client, self._cfg)
         return self._executor
 
+    def _ensure_executor_if_needed(self) -> TradeExecutor | None:
+        """Return None in dry-run so we never touch the CLOB client."""
+        if self._cfg.dry_run:
+            return None
+        return self._ensure_executor()
+
     # ── Scan loop helpers ─────────────────────────────────────────────────────
 
     def _filter_signals(
@@ -92,10 +98,21 @@ class TradingEngine:
         return filtered
 
     async def _execute_signals(
-        self, signals: list[TradingSignal], executor: TradeExecutor
+        self, signals: list[TradingSignal], executor: TradeExecutor | None
     ) -> None:
         """Fire all filtered signals concurrently and record results."""
         if not signals:
+            return
+
+        if executor is None:
+            # Dry-run: log signals but don't touch the CLOB
+            for sig in signals:
+                logger.info(
+                    "[DRY-RUN] Would %s on %s  profit=%.4f",
+                    sig.signal_type.name,
+                    sig.snapshot.question[:55],
+                    sig.estimated_profit,
+                )
             return
 
         logger.info("Firing %d trade(s) concurrently…", len(signals))
@@ -163,9 +180,9 @@ class TradingEngine:
         Start the trading loop.  Runs indefinitely until interrupted (Ctrl+C).
         """
         cfg      = self._cfg
-        executor = self._ensure_executor()
+        executor = self._ensure_executor_if_needed()
 
-        if not cfg.has_credentials:
+        if not cfg.dry_run and not cfg.has_credentials:
             raise RuntimeError(
                 "PRIVATE_KEY and FUNDER_ADDRESS must be set in .env before trading. "
                 "Copy .env.example to .env and fill in your wallet credentials."
