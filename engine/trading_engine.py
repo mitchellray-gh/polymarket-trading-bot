@@ -27,6 +27,9 @@ from dataclasses import dataclass
 
 from tabulate import tabulate
 
+import aiohttp
+
+from .advanced_detector import AdvancedScanResult, run_advanced_scan
 from .client_manager import get_client
 from .config import Config
 from .market_scanner import MarketScanner, MarketSnapshot
@@ -127,6 +130,49 @@ class TradingEngine:
             if self._cfg.dry_run:
                 logger.info("[DRY-RUN] Simulated: %s", pos)
 
+    # ── Advanced scanner (background task) ────────────────────────────────────
+
+    async def _advanced_scan_loop(
+        self, session: aiohttp.ClientSession, interval_s: float = 30.0
+    ) -> None:
+        """Run advanced strategies every `interval_s` seconds; log notable finds."""
+        while True:
+            try:
+                result: AdvancedScanResult = await run_advanced_scan(session)
+
+                if result.negrisk:
+                    for sig in result.negrisk:
+                        logger.warning(
+                            "[NEGRISK ARB] %s  direction=%s  legs=%d  net=%.4f",
+                            sig.event_title[:60], sig.direction, sig.n_legs, sig.net_profit,
+                        )
+                else:
+                    logger.debug("Advanced scan: no negRisk arb found")
+
+                if result.near_expiry:
+                    logger.info(
+                        "[NEAR-EXPIRY] %d market(s) expiring soon with unresolved prices:",
+                        len(result.near_expiry),
+                    )
+                    for sig in result.near_expiry[:5]:
+                        logger.info(
+                            "  %.1fh left | p=%.3f | $%.0f 24h vol | %s",
+                            sig.hours_left, sig.yes_price, sig.volume_24h,
+                            sig.question[:60],
+                        )
+
+                if result.market_maker:
+                    top = result.market_maker[0]
+                    logger.info(
+                        "[MARKET-MAKE] Best MM: spread=%.3f  vol24=$%.0f  %s",
+                        top.spread, top.volume_24h, top.question[:60],
+                    )
+
+            except Exception as exc:
+                logger.warning("Advanced scan error: %s", exc)
+
+            await asyncio.sleep(interval_s)
+
     # ── Dashboard ─────────────────────────────────────────────────────────────
 
     def _print_dashboard(
@@ -205,11 +251,20 @@ class TradingEngine:
         # needs refreshing once a minute.
         DISCOVER_INTERVAL_S = 60.0
 
-        async with MarketScanner(batch_size=cfg.scan_batch_size) as scanner:
+        connector = aiohttp.TCPConnector(limit=50)
+        async with aiohttp.ClientSession(connector=connector) as adv_session, \
+                   MarketScanner(batch_size=cfg.scan_batch_size) as scanner:
             market_meta: list = []
             last_discover_at: float = 0.0
 
-            while True:
+            # Start advanced scanner as a fire-and-forget background task
+            adv_task = asyncio.create_task(
+                self._advanced_scan_loop(adv_session, interval_s=30.0),
+                name="advanced_scanner",
+            )
+
+            try:
+              while True:
                 loop_start = time.monotonic()
 
                 # ── 1a. Refresh market list every 60 s ───────────────────────
@@ -263,3 +318,10 @@ class TradingEngine:
                 sleep_for = max(0.0, cfg.scan_interval_seconds - elapsed)
                 if sleep_for > 0:
                     await asyncio.sleep(sleep_for)
+
+            finally:
+                adv_task.cancel()
+                try:
+                    await adv_task
+                except asyncio.CancelledError:
+                    pass
