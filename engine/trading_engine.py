@@ -143,11 +143,21 @@ class TradingEngine:
                 if result.negrisk:
                     for sig in result.negrisk:
                         logger.warning(
-                            "[NEGRISK ARB] %s  direction=%s  legs=%d  net=%.4f",
+                            "[NEGRISK TAKER ARB] %s  direction=%s  legs=%d  net=%.4f",
                             sig.event_title[:60], sig.direction, sig.n_legs, sig.net_profit,
                         )
                 else:
-                    logger.debug("Advanced scan: no negRisk arb found")
+                    logger.debug("Advanced scan: no negRisk taker arb found")
+
+                if result.negrisk_maker:
+                    for sig in result.negrisk_maker:
+                        logger.warning(
+                            "[NEGRISK MAKER-SELL] %s  legs=%d  overround=+%.2f%%  $/day=$%.4f",
+                            sig.event_title[:55], sig.n_legs,
+                            sig.pct_overround, sig.est_profit_per_day,
+                        )
+                else:
+                    logger.debug("Advanced scan: no negRisk maker-sell found")
 
                 if result.near_expiry:
                     logger.info(

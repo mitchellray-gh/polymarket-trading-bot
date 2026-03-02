@@ -108,9 +108,9 @@ async def _advanced_scan() -> None:
     async with aiohttp.ClientSession(connector=connector) as session:
         result = await run_advanced_scan(session)
 
-    # ── 1. negRisk overround ─────────────────────────────────────────────────
+    # ── 1. negRisk taker arb ─────────────────────────────────────────────────────────────────
     print("\n" + "=" * 70)
-    print("  STRATEGY 1 — negRisk OVERROUND  (mechanical arb if net_profit > 0)")
+    print("  STRATEGY 1 — negRisk TAKER ARB  (instant fill, guaranteed if net > 0)")
     print("=" * 70)
     if result.negrisk:
         rows = [
@@ -128,7 +128,41 @@ async def _advanced_scan() -> None:
             headers=["Direction", "Event", "Legs", "ask_sum", "bid_sum", "Net profit/¢"],
             tablefmt="rounded_outline"))
     else:
-        print("  No negRisk arb found at current order-book prices.")
+        print("  No taker-arb found. (CLOB spreads absorb the overround right now.)")
+
+    # ── 1b. negRisk MAKER-SELL (the real exploit) ────────────────────────────────
+    print("\n" + "=" * 70)
+    print("  STRATEGY 1b — negRisk MAKER-SELL  (★ BEST EXPLOIT — maker fee = 0%)")
+    print("  Post LIMIT SELL orders at midprice on every YES leg.")
+    print("  Collect mid_sum > $1.00 when fills arrive. Pay $1.00 at resolution.")
+    print("=" * 70)
+    if result.negrisk_maker:
+        rows = [
+            [
+                sig.event_title[:44],
+                sig.n_legs,
+                f"{sig.mid_sum:.4f}",
+                f"{sig.pct_overround:.2f}%",
+                f"${sig.total_vol_24h:,.0f}",
+                f"{sig.est_days_to_fill:.1f}d",
+                f"${sig.est_profit_per_day:.4f}",
+            ]
+            for sig in result.negrisk_maker
+        ]
+        print(tabulate(rows,
+            headers=["Event", "Legs", "mid_sum", "Overround", "Vol24h", "Fill est", "$/day/$1k"],
+            tablefmt="rounded_outline"))
+        best = result.negrisk_maker[0]
+        print(f"\n  TOP TARGET: {best.event_title}")
+        print(f"  Action: POST limit SELL at these prices for each YES token:")
+        for leg in best.legs[:10]:
+            print(f"    SELL @ {leg['midprice']:.4f}  vol24=${leg['vol24']:>8,.0f}  {leg['question'][:55]}")
+        if len(best.legs) > 10:
+            print(f"    ... and {len(best.legs)-10} more legs")
+        print(f"  Expected: ${best.gross_profit*1000:.2f} profit per $1,000 notional")
+        print(f"            ${best.est_profit_per_day*1000:.4f}/day  =  ${best.est_profit_per_day*1000/86400:.6f}/sec  (at $1k)")
+    else:
+        print("  No maker-sell opportunities found above threshold.")
 
     # ── 2. Near-expiry mispricing ─────────────────────────────────────────────
     print("\n" + "=" * 70)

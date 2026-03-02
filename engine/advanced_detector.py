@@ -1,7 +1,7 @@
 """
 engine/advanced_detector.py
 ─────────────────────────────
-Three profit strategies the base binary-arb scanner misses entirely:
+Four profit strategies the base binary-arb scanner misses entirely:
 
 1. negRisk OVERROUND (mechanical, risk-free)
    ─────────────────────────────────────────
@@ -25,6 +25,17 @@ Three profit strategies the base binary-arb scanner misses entirely:
    daily volume. Place resting limit orders on both sides near the midpoint
    and collect the spread on each matched pair.
    Return: list of MM candidates with suggested bid/ask quotes.
+
+4. negRisk MAKER-SELL overround (BEST EXPLOIT — fee=0%, structural edge)
+   ───────────────────────────────────────────────────────────────────────
+   Polymarket maker fee = 0%.  So any negRisk event where sum(midprices) > 1.00
+   is immediately exploitable with maker (limit) orders:
+     - POST limit SELL on every YES leg at midprice
+     - Orders fill over time via organic buyers (fee=0 to you)
+     - Once all legs fill, you've collected mid_sum > 1.00
+     - At resolution, exactly 1 leg pays $1.00 → profit = mid_sum − 1.00
+   The Masters 2026: 59 legs, mid_sum=1.0745, vol24=$3.38M → ~$74/day/1k notional
+   Filters out non-exclusive events (mul-qual, GTA VI) using mid_sum ≤ 1.30.
 """
 from __future__ import annotations
 
@@ -49,8 +60,11 @@ from .config import GAMMA_API_HOST, CLOB_HOST
 logger = logging.getLogger(__name__)
 
 # ─── Config knobs ─────────────────────────────────────────────────────────────
-NEGRISK_MIN_EDGE        = 0.002   # min profit (after fees) to trigger negRisk arb
+NEGRISK_MIN_EDGE        = 0.002   # min profit (after fees) to trigger negRisk taker arb
+NEGRISK_MAKER_MIN_EDGE  = 0.001   # min overround to trigger maker-sell strategy (fee=0)
+NEGRISK_MAX_SAFE_SUM    = 1.30    # mid_sum above this → probably not truly exclusive (filter out)
 TAKER_FEE_PER_LEG       = 0.001   # 0.1 % Polymarket taker fee
+MAKER_FEE_PER_LEG       = 0.000   # 0.0 % Polymarket maker fee (LIMIT orders)
 NEAR_EXPIRY_HOURS       = 48      # flag markets expiring within this window
 NEAR_EXPIRY_MIN_LIQ     = 50.0    # min liquidity USD to be worth flagging
 NEAR_EXPIRY_PRICE_MIN   = 0.05    # price band — below this it's almost certainly
@@ -79,6 +93,32 @@ class NegRiskSignal:
     n_legs:         int
     legs:           list[dict[str, Any]] = field(default_factory=list)
     # each leg:  {condition_id, question, yes_token_id, best_ask, best_bid}
+
+
+@dataclass
+class NegRiskMakerSignal:
+    """
+    Strategy 4: negRisk maker-sell overround.
+
+    Place LIMIT SELL orders at midprice on every YES leg.
+    Maker fee = 0%.  When all legs fill, collect mid_sum > 1.00.
+    Exactly one leg resolves at $1.00 — profit = mid_sum - 1.00.
+
+    Only valid when mid_sum is between 1.001 and NEGRISK_MAX_SAFE_SUM
+    (above that threshold the event outcomes are likely NOT mutually exclusive).
+    """
+    event_id:        str
+    event_title:     str
+    mid_sum:         float       # sum of YES midprices across all legs
+    gross_profit:    float       # mid_sum - 1.00  (no fees, maker = 0)
+    pct_overround:   float       # gross_profit as a percentage
+    n_legs:          int
+    total_vol_24h:   float       # combined 24h volume across all legs
+    total_liq:       float
+    est_days_to_fill: float      # days until all legs are likely filled
+    est_profit_per_day: float    # gross_profit / est_days_to_fill
+    legs:            list[dict[str, Any]] = field(default_factory=list)
+    # each leg: {condition_id, question, yes_token_id, midprice, bid, ask, vol24}
 
 
 @dataclass
@@ -431,26 +471,145 @@ async def scan_market_maker_opportunities(
     return signals
 
 
+# ─── Strategy 4: negRisk maker-sell ─────────────────────────────────────────
+
+async def scan_negrisk_maker_sell(
+    session: aiohttp.ClientSession,
+) -> list[NegRiskMakerSignal]:
+    """
+    Find negRisk events where sum(midprices) > 1.00 + NEGRISK_MAKER_MIN_EDGE.
+    Uses ONLY Gamma midprices (no CLOB book fetch needed).
+    Maker fee = 0%, so any positive overround is immediately exploitable.
+
+    Filters out events where mid_sum > NEGRISK_MAX_SAFE_SUM (1.30) because
+    those are almost certainly NOT truly mutually exclusive (e.g. GTA VI
+    multi-event groups, FIFA multi-qualifier groups).
+    """
+    import json as _stdlib_json
+
+    markets = await _fetch_gamma_markets(session, {"negRisk": "true"}, max_markets=1000)
+
+    # Group by event
+    events: dict[str, dict] = {}
+    for m in markets:
+        evs  = m.get("events", [])
+        eid  = evs[0]["id"]    if evs else m.get("conditionId", "solo")
+        etit = evs[0]["title"] if evs else m.get("question", "?")
+        if eid not in events:
+            events[eid] = {"title": etit, "markets": []}
+        events[eid]["markets"].append(m)
+
+    signals: list[NegRiskMakerSignal] = []
+
+    for eid, ev in events.items():
+        if len(ev["markets"]) < 2:
+            continue
+
+        legs_data = []
+        mid_sum   = 0.0
+        total_vol = 0.0
+        total_liq = 0.0
+        ok        = True
+
+        for m in ev["markets"]:
+            try:
+                prices = _stdlib_json.loads(m.get("outcomePrices", "[]"))
+                mid    = float(prices[0])
+                bid    = float(m.get("bestBid") or 0)
+                ask    = float(m.get("bestAsk") or 0)
+                vol24  = float(m.get("volume24hr") or 0)
+                liq    = float(m.get("liquidityNum") or 0)
+                if mid <= 0:
+                    ok = False; break
+            except Exception:
+                ok = False; break
+
+            tok   = _stdlib_json.loads(m.get("clobTokenIds", "[]")) if isinstance(m.get("clobTokenIds"), str) else (m.get("clobTokenIds") or [])
+            yes_id = str(tok[0]) if tok else ""
+
+            mid_sum   += mid
+            total_vol += vol24
+            total_liq += liq
+            legs_data.append({
+                "condition_id": m.get("conditionId", ""),
+                "question":     m.get("question", "?"),
+                "yes_token_id": yes_id,
+                "midprice":     round(mid, 5),
+                "bid":          round(bid, 5),
+                "ask":          round(ask, 5),
+                "vol24":        vol24,
+            })
+
+        if not ok or not legs_data:
+            continue
+
+        gross = round(mid_sum - 1.0, 6)
+
+        # Filter: not enough overround
+        if gross < NEGRISK_MAKER_MIN_EDGE:
+            continue
+
+        # Filter: mid_sum too high → almost certainly non-exclusive event group
+        if mid_sum > NEGRISK_MAX_SAFE_SUM:
+            logger.debug(
+                "Skipping non-exclusive negRisk event '%s' mid_sum=%.3f",
+                ev["title"][:40], mid_sum
+            )
+            continue
+
+        # Estimate days to fill all legs conservatively
+        avg_liq = total_liq / len(legs_data)
+        avg_vol = total_vol / len(legs_data)
+        fill_rate = min(avg_vol / max(avg_liq, 1), 1.0)  # fraction filled per day
+        days_to_fill = round(1.0 / max(fill_rate, 0.001), 2)
+        profit_per_day = round(gross / max(days_to_fill, 0.01), 6)
+
+        signals.append(NegRiskMakerSignal(
+            event_id=eid,
+            event_title=ev["title"],
+            mid_sum=round(mid_sum, 5),
+            gross_profit=gross,
+            pct_overround=round(gross * 100, 3),
+            n_legs=len(legs_data),
+            total_vol_24h=total_vol,
+            total_liq=total_liq,
+            est_days_to_fill=days_to_fill,
+            est_profit_per_day=profit_per_day,
+            legs=legs_data,
+        ))
+        logger.info(
+            "negRisk MAKER-SELL: '%s'  mid_sum=%.4f  gross=+%.4f  vol24=$%.0f",
+            ev["title"][:50], mid_sum, gross, total_vol,
+        )
+
+    # Sort by profit_per_day descending
+    signals.sort(key=lambda s: -s.est_profit_per_day)
+    logger.info("scan_negrisk_maker_sell: %d signals", len(signals))
+    return signals
+
+
 # ─── Combined scanner ─────────────────────────────────────────────────────────
 
 @dataclass
 class AdvancedScanResult:
-    negrisk:      list[NegRiskSignal]
-    near_expiry:  list[NearExpirySignal]
-    market_maker: list[MarketMakerSignal]
-    elapsed_ms:   float
+    negrisk:        list[NegRiskSignal]
+    negrisk_maker:  list[NegRiskMakerSignal]
+    near_expiry:    list[NearExpirySignal]
+    market_maker:   list[MarketMakerSignal]
+    elapsed_ms:     float
 
 
 async def run_advanced_scan(
     session: aiohttp.ClientSession,
 ) -> AdvancedScanResult:
     """
-    Run all three advanced scans concurrently.
+    Run all four advanced scans concurrently.
     Designed to be called once at startup and then every ~30 s.
     """
     t0 = time.monotonic()
-    negrisk, near_expiry, mm = await asyncio.gather(
+    negrisk, negrisk_maker, near_expiry, mm = await asyncio.gather(
         scan_negrisk_overround(session),
+        scan_negrisk_maker_sell(session),
         scan_near_expiry(session),
         scan_market_maker_opportunities(session),
         return_exceptions=False,
@@ -458,11 +617,12 @@ async def run_advanced_scan(
     elapsed = (time.monotonic() - t0) * 1000
     logger.info(
         "Advanced scan complete in %.0f ms: "
-        "negRisk=%d  near_expiry=%d  market_maker=%d",
-        elapsed, len(negrisk), len(near_expiry), len(mm),
+        "negRisk_taker=%d  negRisk_maker=%d  near_expiry=%d  market_maker=%d",
+        elapsed, len(negrisk), len(negrisk_maker), len(near_expiry), len(mm),
     )
     return AdvancedScanResult(
         negrisk=negrisk,
+        negrisk_maker=negrisk_maker,
         near_expiry=near_expiry,
         market_maker=mm,
         elapsed_ms=elapsed,
